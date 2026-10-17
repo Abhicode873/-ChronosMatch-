@@ -78,6 +78,40 @@ class OrderBook:
         """Return the number of orders currently resting in the book."""
         return len(self._active_orders)
 
+    def cancel(self, order_id: str) -> bool:
+        """Cancel an active order and remove its remaining quantity.
+
+        Returns True if an active order was cancelled, or False if the
+        order is unknown, already cancelled, or fully filled.
+        Cancelled order IDs remain reserved and cannot be reused.
+        """
+        if not isinstance(order_id, str):
+            raise TypeError("order_id must be a string")
+
+        resting = self._active_orders.get(order_id)
+        if resting is None:
+            return False
+
+        order = resting.order
+
+        # Find the price level containing this order.
+        levels = self._bids if order.side is Side.BUY else self._asks
+        price_ticks = order.price_ticks
+        queue = levels[price_ticks]
+
+        # Remove only this order; preserve the order of all others.
+        queue.remove(resting)
+        del self._active_orders[order_id]
+
+        # The corresponding heap entry, if any, becomes stale.
+        # _peek_best_price() already discards stale entries lazily.
+        if not queue:
+            del levels[price_ticks]
+
+        # Do not remove the ID from _seen_order_ids.
+        return True
+
+
     def submit(self, order: Order) -> list[Trade]:
         """Submit an order, execute compatible trades, and rest any remainder.
 
