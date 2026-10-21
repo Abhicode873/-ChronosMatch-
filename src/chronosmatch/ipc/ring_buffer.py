@@ -1,17 +1,23 @@
 
 """Memory-mapped ring buffer for fixed-size ChronosMatch orders.
 
-This version provides sequential FIFO access and persistence across close
-and reopen. It is not yet safe for concurrent producer-consumer access.
+This implementation supports sequential use and coordinated access by
+multiple handles that share the same lock. Initialize the file before
+starting producer and consumer processes.
 """
 
 import mmap
 import struct
 from pathlib import Path
-from typing import Self
+from threading import RLock
+from typing import Any, Self
 
 from chronosmatch.core.models import Order
-from chronosmatch.ipc.protocol import ORDER_RECORD_SIZE, decode_order, encode_order
+from chronosmatch.ipc.protocol import (
+    ORDER_RECORD_SIZE,
+    decode_order,
+    encode_order,
+)
 
 _MAGIC = b"CMRB"
 _VERSION = 1
@@ -22,12 +28,18 @@ _MAX_CAPACITY = (1 << 32) - 1
 # read sequence (8), write sequence (8), reserved (4).
 _HEADER = struct.Struct(">4sB3xIQQ4x")
 _HEADER_SIZE = _HEADER.size
+_UINT64_MAX = (1 << 64) - 1
 
 
 class RingBuffer:
-    """Persistent, fixed-capacity FIFO ring buffer for Order records."""
+    """Persistent FIFO ring buffer for fixed-size order records."""
 
-    def __init__(self, path: str | Path, capacity: int) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        capacity: int,
+        lock: Any | None = None,
+    ) -> None:
         if type(capacity) is not int:
             raise TypeError("capacity must be an integer")
         if capacity <= 0:
@@ -37,73 +49,39 @@ class RingBuffer:
 
         self.path = Path(path)
         self.capacity = capacity
+        self._lock = lock if lock is not None else RLock()
         self._closed = False
         self._map: mmap.mmap | None = None
+        self._read_seq = 0
+        self._write_seq = 0
 
         self._file = self.path.open(
-         "r+b" if self.path.exists() else "w+b",
-         buffering=0,
-         )
+            "r+b" if self.path.exists() else "w+b",
+            buffering=0,
+        )
 
         try:
-            file_size = self.path.stat().st_size
             expected_size = _HEADER_SIZE + capacity * ORDER_RECORD_SIZE
+            file_size = self.path.stat().st_size
 
             if file_size == 0:
-                # Initialize a new buffer file.
+                # Initialize the file before producer/consumer processes start.
                 self._file.truncate(expected_size)
-                self._read_seq = 0
-                self._write_seq = 0
                 self._file.seek(0)
                 self._file.write(
                     _HEADER.pack(
                         _MAGIC,
                         _VERSION,
                         capacity,
-                        self._read_seq,
-                        self._write_seq,
+                        0,
+                        0,
                     )
                 )
                 self._file.flush()
-
-            else:
-                if file_size < _HEADER_SIZE:
-                    raise ValueError("Buffer file is too small for its header")
-
-                self._file.seek(0)
-                raw_header = self._file.read(_HEADER_SIZE)
-
-                try:
-                    (
-                        magic,
-                        version,
-                        stored_capacity,
-                        read_seq,
-                        write_seq,
-                    ) = _HEADER.unpack(raw_header)
-                except struct.error as exc:
-                    raise ValueError("Invalid ring-buffer header") from exc
-
-                if magic != _MAGIC:
-                    raise ValueError("Invalid ring-buffer magic header")
-                if version != _VERSION:
-                    raise ValueError(
-                        f"Unsupported ring-buffer version: {version}"
-                    )
-                if stored_capacity != capacity:
-                    raise ValueError(
-                        f"Existing buffer capacity is {stored_capacity}, "
-                        f"not {capacity}"
-                    )
-                if file_size != expected_size:
-                    raise ValueError("Ring-buffer file size is invalid")
-                if write_seq < read_seq:
-                    raise ValueError("Invalid ring-buffer sequence counters")
-                if write_seq - read_seq > capacity:
-                    raise ValueError("Ring-buffer occupancy exceeds capacity")
-
-                self._read_seq = read_seq
-                self._write_seq = write_seq
+            elif file_size < _HEADER_SIZE:
+                raise ValueError("Buffer file is too small for its header")
+            elif file_size != expected_size:
+                raise ValueError("Ring-buffer file size is invalid")
 
             self._map = mmap.mmap(
                 self._file.fileno(),
@@ -111,22 +89,57 @@ class RingBuffer:
                 access=mmap.ACCESS_WRITE,
             )
 
+            with self._lock:
+                self._refresh_header(self._ensure_open())
+
         except Exception:
+            if self._map is not None:
+                self._map.close()
+                self._map = None
             self._file.close()
             self._closed = True
             raise
 
     def _ensure_open(self) -> mmap.mmap:
-        """Return the mapping or raise if the buffer is closed."""
+        """Return the memory mapping or raise when closed."""
         if self._closed or self._map is None:
             raise ValueError("Ring buffer is closed")
         return self._map
 
+    def _refresh_header(self, mapping: mmap.mmap) -> None:
+        """Refresh local counters from shared metadata while holding the lock."""
+        try:
+            (
+                magic,
+                version,
+                stored_capacity,
+                read_seq,
+                write_seq,
+            ) = _HEADER.unpack_from(mapping, 0)
+        except struct.error as exc:
+            raise ValueError("Invalid ring-buffer header") from exc
+
+        if magic != _MAGIC:
+            raise ValueError("Invalid ring-buffer magic header")
+        if version != _VERSION:
+            raise ValueError(f"Unsupported ring-buffer version: {version}")
+        if stored_capacity != self.capacity:
+            raise ValueError("Ring-buffer capacity does not match its header")
+        if write_seq < read_seq:
+            raise ValueError("Invalid ring-buffer sequence counters")
+        if write_seq - read_seq > self.capacity:
+            raise ValueError("Ring-buffer occupancy exceeds capacity")
+
+        self._read_seq = read_seq
+        self._write_seq = write_seq
+
     @property
     def size(self) -> int:
         """Return the number of unread records."""
-        self._ensure_open()
-        return self._write_seq - self._read_seq
+        with self._lock:
+            mapping = self._ensure_open()
+            self._refresh_header(mapping)
+            return self._write_seq - self._read_seq
 
     @property
     def is_empty(self) -> bool:
@@ -135,48 +148,54 @@ class RingBuffer:
 
     @property
     def is_full(self) -> bool:
-        """Return whether the buffer has reached its capacity."""
+        """Return whether the buffer has reached capacity."""
         return self.size == self.capacity
 
     def write(self, order: Order) -> bool:
-        """Write an order, returning False when the buffer is full."""
-        mapping = self._ensure_open()
-
-        # Validate and encode before changing buffer state.
+        """Write an order or return False when the buffer is full."""
+        # Encode before acquiring the lock to keep the critical section short.
         record = encode_order(order)
 
-        if self.is_full:
-            return False
+        with self._lock:
+            mapping = self._ensure_open()
+            self._refresh_header(mapping)
 
-        slot = self._write_seq % self.capacity
-        offset = _HEADER_SIZE + slot * ORDER_RECORD_SIZE
+            if self._write_seq - self._read_seq >= self.capacity:
+                return False
 
-        mapping[offset : offset + ORDER_RECORD_SIZE] = record
+            slot = self._write_seq % self.capacity
+            offset = _HEADER_SIZE + slot * ORDER_RECORD_SIZE
 
-        self._write_seq += 1
-        self._write_header(mapping)
-        return True
+            # Publish the record before updating the shared write counter.
+            mapping[offset : offset + ORDER_RECORD_SIZE] = record
+            self._write_seq += 1
+            self._write_header(mapping)
+            return True
 
     def read(self) -> Order | None:
-        """Read the oldest order, or return None when the buffer is empty."""
-        mapping = self._ensure_open()
+        """Read the oldest record, or return None if the buffer is empty."""
+        with self._lock:
+            mapping = self._ensure_open()
+            self._refresh_header(mapping)
 
-        if self.is_empty:
-            return None
+            if self._write_seq == self._read_seq:
+                return None
 
-        slot = self._read_seq % self.capacity
-        offset = _HEADER_SIZE + slot * ORDER_RECORD_SIZE
+            slot = self._read_seq % self.capacity
+            offset = _HEADER_SIZE + slot * ORDER_RECORD_SIZE
 
-        # Copy this one record out of the mapping before decoding.
-        record = mapping[offset : offset + ORDER_RECORD_SIZE]
-        order = decode_order(record)
+            record = mapping[offset : offset + ORDER_RECORD_SIZE]
+            order = decode_order(record)
 
-        self._read_seq += 1
-        self._write_header(mapping)
-        return order
+            self._read_seq += 1
+            self._write_header(mapping)
+            return order
 
     def _write_header(self, mapping: mmap.mmap) -> None:
-        """Persist the current metadata in the mapped header."""
+        """Write updated sequence counters to the shared metadata header."""
+        if self._read_seq > _UINT64_MAX or self._write_seq > _UINT64_MAX:
+            raise OverflowError("Ring-buffer sequence counter exhausted")
+
         _HEADER.pack_into(
             mapping,
             0,
@@ -188,19 +207,20 @@ class RingBuffer:
         )
 
     def close(self) -> None:
-        """Flush and close the mapping and underlying file."""
-        if self._closed:
-            return
+        """Flush and close this handle's mapping and file."""
+        with self._lock:
+            if self._closed:
+                return
 
-        mapping = self._ensure_open()
-        mapping.flush()
-        mapping.close()
-        self._map = None
-        self._file.close()
-        self._closed = True
+            mapping = self._ensure_open()
+            mapping.flush()
+            mapping.close()
+            self._map = None
+            self._file.close()
+            self._closed = True
 
     def __enter__(self) -> Self:
-        """Allow use through a with statement."""
+        """Support use as a context manager."""
         self._ensure_open()
         return self
 
