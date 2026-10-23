@@ -102,6 +102,18 @@ def test_duplicate_active_order_id_is_rejected() -> None:
         book.submit(1, BUY, 99, 1)
 
 
+def test_filled_order_id_cannot_be_reused() -> None:
+    book = CythonOrderBook(capacity=8)
+
+    book.submit(1, SELL, 100, 1)
+    trades = book.submit(2, BUY, 100, 1)
+
+    assert trades == [(1, 2, 100, 1)]
+    assert book.active_order_count == 0
+
+    with pytest.raises(ValueError, match="Duplicate"):
+        book.submit(1, BUY, 99, 1)
+
 def test_full_book_rejects_an_additional_resting_order() -> None:
     book = CythonOrderBook(capacity=1)
 

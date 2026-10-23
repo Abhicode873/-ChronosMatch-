@@ -33,6 +33,7 @@ cdef class CythonOrderBook:
     cdef Py_ssize_t _capacity
     cdef Py_ssize_t _active_count
     cdef uint64_t _next_sequence
+    cdef set _seen_order_ids
 
     def __cinit__(self, capacity=1024):
         cdef Py_ssize_t i
@@ -41,6 +42,7 @@ cdef class CythonOrderBook:
         self._capacity = 0
         self._active_count = 0
         self._next_sequence = 0
+        self._seen_order_ids = set()
 
         if isinstance(capacity, bool) or not isinstance(capacity, int):
             raise TypeError("capacity must be an integer")
@@ -90,6 +92,7 @@ cdef class CythonOrderBook:
 
         if not found:
             return None
+
         return best_price
 
     @property
@@ -110,11 +113,12 @@ cdef class CythonOrderBook:
 
         if not found:
             return None
+
         return best_price
 
     @property
     def active_order_count(self):
-        """Return the number of orders resting in the book."""
+        """Return the number of orders currently resting in the book."""
         return self._active_count
 
     def submit(self, order_id, side, price_ticks, quantity):
@@ -123,8 +127,9 @@ cdef class CythonOrderBook:
         Each trade is:
             (maker_order_id, taker_order_id, price_ticks, quantity)
 
-        Price-time priority is enforced by choosing the best eligible
-        price and then the earliest sequence number.
+        Price-time priority is enforced by selecting the best eligible
+        resting price, followed by the earliest sequence at that price.
+        Accepted order IDs cannot be reused during the book's lifetime.
         """
         cdef uint64_t oid
         cdef uint8_t side_value
@@ -139,7 +144,7 @@ cdef class CythonOrderBook:
         cdef bint has_crossing_order
         cdef list trades
 
-        # Validate identifiers and numeric inputs before changing state.
+        # Validate all user-supplied fields before changing the book.
         if isinstance(order_id, bool) or not isinstance(order_id, int):
             raise TypeError("order_id must be an integer")
 
@@ -162,7 +167,9 @@ cdef class CythonOrderBook:
             raise ValueError("price_ticks and quantity must be positive")
 
         if price_ticks > _INT64_MAX_PY or quantity > _INT64_MAX_PY:
-            raise ValueError("price_ticks and quantity must fit signed 64-bit")
+            raise ValueError(
+                "price_ticks and quantity must fit signed 64-bit"
+            )
 
         oid = order_id
         side_value = side
@@ -170,15 +177,12 @@ cdef class CythonOrderBook:
         quantity_value = quantity
         remaining = quantity_value
 
-        # A resting ID cannot be duplicated.
-        for i in range(self._capacity):
-            if (
-                self._orders[i].active
-                and self._orders[i].order_id == oid
-            ):
-                raise ValueError("Duplicate active order ID")
+        # Reject IDs accepted previously, even if their orders were filled.
+        if oid in self._seen_order_ids:
+            raise ValueError("Duplicate order ID")
 
-        # Avoid mutating a full book if this order cannot trade at all.
+        # A full book can accept a crossing order, but not an order that
+        # cannot trade and would have to rest immediately.
         if self._active_count == self._capacity:
             has_crossing_order = False
 
@@ -209,7 +213,7 @@ cdef class CythonOrderBook:
         while remaining > 0:
             best_index = -1
 
-            # Select the best eligible resting order, including FIFO ties.
+            # Find the best eligible resting order with FIFO tie-breaking.
             for i in range(self._capacity):
                 if not self._orders[i].active:
                     continue
@@ -282,7 +286,7 @@ cdef class CythonOrderBook:
                 resting.active = 0
                 self._active_count -= 1
 
-        # Store any unfilled remainder as a new resting order.
+        # Store any unfilled remainder as a resting order.
         if remaining > 0:
             free_index = -1
 
@@ -306,5 +310,8 @@ cdef class CythonOrderBook:
 
             self._next_sequence += 1
             self._active_count += 1
+
+        # Remember the ID after the order has been successfully processed.
+        self._seen_order_ids.add(oid)
 
         return trades
