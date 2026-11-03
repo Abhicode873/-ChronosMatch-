@@ -76,6 +76,7 @@ async def run_demo(
 
         elapsed = time.perf_counter() - start
 
+
     # Recover per-symbol order totals from generated and processed counts
     # is not possible from the summary alone; trade totals are reported below.
     symbol_trades = Counter(
@@ -92,6 +93,34 @@ async def run_demo(
     print(f"Pipeline rate: {order_count / elapsed:,.0f} orders/sec")
     print(f"Ring-buffer capacity: {buffer_capacity}")
     print(f"Buffer high-watermark: {result.buffer_high_watermark}")
+
+    metrics = result.metrics
+
+    print("\nPerformance Monitoring")
+    print("-" * 40)
+    print(f"Orders processed: {metrics.orders_processed:,}")
+    print(f"Trades executed: {metrics.trades_executed:,}")
+    print(
+        f"Measured throughput: "
+        f"{metrics.throughput_orders_per_second:,.0f} orders/sec"
+    )
+
+    print("\nOrder Processing Latency")
+    print(
+        f"  Minimum: {metrics.latency_min_ns / 1_000:.3f} us"
+    )
+    print(
+        f"  Maximum: {metrics.latency_max_ns / 1_000:.3f} us"
+    )
+    print(
+        f"  p50: {metrics.latency_p50_ns / 1_000:.3f} us"
+    )
+    print(
+        f"  p95: {metrics.latency_p95_ns / 1_000:.3f} us"
+    )
+    print(
+        f"  p99: {metrics.latency_p99_ns / 1_000:.3f} us"
+    )
 
     print("\nTrades by symbol:")
     if symbol_trades:

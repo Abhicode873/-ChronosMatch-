@@ -5,6 +5,7 @@ import asyncio
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic_ns, perf_counter_ns
 
 from chronosmatch.core.cython_order_book import (
     BUY,
@@ -12,6 +13,10 @@ from chronosmatch.core.cython_order_book import (
     CythonOrderBook,
 )
 from chronosmatch.ipc.ring_buffer import RingBuffer
+from chronosmatch.monitoring.metrics import (
+    MetricsCollector,
+    MetricsSnapshot,
+)
 from chronosmatch.simulator.market_simulator import AsyncMarketSimulator
 
 
@@ -45,6 +50,7 @@ class PipelineResult:
     trades: tuple[ExecutedTrade, ...]
     books: tuple[BookSummary, ...]
     buffer_high_watermark: int
+    metrics: MetricsSnapshot
 
     @property
     def trade_count(self) -> int:
@@ -66,6 +72,12 @@ async def run_market_pipeline(
     The producer generates orders and writes them to the memory-mapped
     ring buffer. The consumer reads, decodes, and submits them to a
     separate Cython order book for each trading symbol.
+
+    Metrics include:
+    - End-to-end order processing latency.
+    - Total processed orders and executed trades.
+    - Pipeline throughput.
+    - Ring-buffer high-watermark.
     """
     if not isinstance(simulator, AsyncMarketSimulator):
         raise TypeError("simulator must be an AsyncMarketSimulator")
@@ -97,12 +109,14 @@ async def run_market_pipeline(
 
     generated_count = 0
     processed_count = 0
-    high_watermark = 0
     next_engine_id = 0
 
     books: dict[str, CythonOrderBook] = {}
     engine_id_to_order_id: dict[int, str] = {}
     executions: list[ExecutedTrade] = []
+
+    metrics_collector = MetricsCollector()
+    pipeline_started_ns = perf_counter_ns()
 
     with RingBuffer(buffer_path, buffer_capacity) as buffer:
         if buffer.size != 0:
@@ -112,17 +126,16 @@ async def run_market_pipeline(
 
         async def producer() -> None:
             """Generate orders and publish them to shared memory."""
-            nonlocal generated_count, high_watermark
+            nonlocal generated_count
 
             async for order in simulator.stream_orders(order_count):
                 while not buffer.write(order):
                     await asyncio.sleep(poll_interval_seconds)
 
                 generated_count += 1
-                high_watermark = max(
-                    high_watermark,
-                    buffer.size,
-                )
+
+                # Track maximum observed ring-buffer occupancy.
+                metrics_collector.record_buffer_size(buffer.size)
 
         async def consumer() -> None:
             """Read orders and execute them in symbol-specific books."""
@@ -135,11 +148,13 @@ async def run_market_pipeline(
                     await asyncio.sleep(poll_interval_seconds)
                     continue
 
+                # Assign an internal numeric ID for the Cython engine.
                 next_engine_id += 1
                 engine_id = next_engine_id
 
                 engine_id_to_order_id[engine_id] = order.order_id
 
+                # Each trading symbol gets its own independent book.
                 book = books.get(order.symbol)
 
                 if book is None:
@@ -148,6 +163,7 @@ async def run_market_pipeline(
 
                 side_code = BUY if order.side.value == "BUY" else SELL
 
+                # Submit the decoded order to the matching engine.
                 trades = book.submit(
                     engine_id,
                     side_code,
@@ -166,6 +182,17 @@ async def run_market_pipeline(
                         )
                     )
 
+                # Measure from simulator order creation to completed matching.
+                latency_ns = max(
+                    0,
+                    monotonic_ns() - order.timestamp_ns,
+                )
+
+                metrics_collector.record_order(
+                    latency_ns=latency_ns,
+                    trades=len(trades),
+                )
+
                 processed_count += 1
 
         # If either task fails, TaskGroup cancels the other task.
@@ -183,10 +210,18 @@ async def run_market_pipeline(
             for symbol, book in sorted(books.items())
         )
 
+    # Capture complete pipeline execution time.
+    elapsed_ns = perf_counter_ns() - pipeline_started_ns
+
+    metrics_snapshot = metrics_collector.snapshot(
+        elapsed_ns=elapsed_ns,
+    )
+
     return PipelineResult(
         orders_generated=generated_count,
         orders_processed=processed_count,
         trades=tuple(executions),
         books=book_summaries,
-        buffer_high_watermark=high_watermark,
+        buffer_high_watermark=metrics_snapshot.buffer_high_watermark,
+        metrics=metrics_snapshot,
     )

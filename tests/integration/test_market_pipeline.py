@@ -37,6 +37,28 @@ def test_pipeline_generates_transfers_and_executes_orders(tmp_path) -> None:
     assert result.orders_processed == order_count
     assert simulator.generated_count == order_count
 
+        # Verify pipeline performance metrics.
+    metrics = result.metrics
+
+    assert metrics.orders_processed == order_count
+    assert metrics.trades_executed == result.trade_count
+
+    assert metrics.elapsed_ns > 0
+    assert metrics.throughput_orders_per_second > 0
+
+    assert metrics.latency_min_ns is not None
+    assert metrics.latency_max_ns is not None
+    assert metrics.latency_p50_ns is not None
+    assert metrics.latency_p95_ns is not None
+    assert metrics.latency_p99_ns is not None
+
+    assert metrics.latency_min_ns <= metrics.latency_p50_ns
+    assert metrics.latency_p50_ns <= metrics.latency_p95_ns
+    assert metrics.latency_p95_ns <= metrics.latency_p99_ns
+    assert metrics.latency_p99_ns <= metrics.latency_max_ns
+
+    assert metrics.buffer_high_watermark == result.buffer_high_watermark
+
     assert result.trade_count > 0
     assert all(trade.symbol == "AAPL" for trade in result.trades)
     assert all(trade.price_ticks > 0 for trade in result.trades)
