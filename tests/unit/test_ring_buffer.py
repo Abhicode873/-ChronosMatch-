@@ -142,3 +142,31 @@ def test_non_order_input_is_rejected(tmp_path) -> None:
         pytest.raises(TypeError),
     ):
         ring.write("not an order")  # type: ignore[arg-type]
+
+def test_buffer_state_updates_after_reading_and_writing(tmp_path) -> None:
+    first = make_order("order-1")
+    second = make_order("order-2")
+    third = make_order("order-3")
+
+    with RingBuffer(tmp_path / "orders.mmap", capacity=2) as ring:
+        assert ring.write(first) is True
+        assert ring.write(second) is True
+
+        assert ring.is_full is True
+        assert ring.size == 2
+
+        assert ring.read() == first
+
+        assert ring.is_full is False
+        assert ring.is_empty is False
+        assert ring.size == 1
+
+        assert ring.write(third) is True
+        assert ring.is_full is True
+
+        assert ring.read() == second
+        assert ring.read() == third
+
+        assert ring.is_empty is True
+        assert ring.is_full is False
+        assert ring.size == 0       
