@@ -308,3 +308,32 @@ def test_write_rejects_exhausted_sequence_counter_without_mutation(
         # The failed write must not change the buffer state.
         assert ring.size == 0
         assert ring.read() is None
+
+def test_write_with_size_returns_current_occupancy(tmp_path) -> None:
+    with RingBuffer(tmp_path / "write-size.mmap", capacity=2) as ring:
+        written, size = ring.write_with_size(make_order("order-001"))
+        assert written is True
+        assert size == 1
+
+        written, size = ring.write_with_size(make_order("order-002"))
+        assert written is True
+        assert size == 2
+
+        assert ring.size == 2
+
+
+def test_write_with_size_reports_full_buffer_without_overwriting(
+    tmp_path,
+) -> None:
+    with RingBuffer(tmp_path / "write-size-full.mmap", capacity=2) as ring:
+        assert ring.write_with_size(make_order("order-001")) == (True, 1)
+        assert ring.write_with_size(make_order("order-002")) == (True, 2)
+
+        written, size = ring.write_with_size(make_order("order-003"))
+
+        assert written is False
+        assert size == 2
+
+        assert ring.read().order_id == "order-001"
+        assert ring.read().order_id == "order-002"
+        assert ring.read() is None

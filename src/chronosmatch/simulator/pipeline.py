@@ -129,13 +129,18 @@ async def run_market_pipeline(
             nonlocal generated_count
 
             async for order in simulator.stream_orders(order_count):
-                while not buffer.write(order):
+                while True:
+                    written, buffer_size = buffer.write_with_size(order)
+
+                    if written:
+                        break
+
                     await asyncio.sleep(poll_interval_seconds)
 
                 generated_count += 1
 
-                # Track maximum observed ring-buffer occupancy.
-                metrics_collector.record_buffer_size(buffer.size)
+                # Record occupancy returned from the existing write lock.
+                metrics_collector.record_buffer_size(buffer_size)
 
         async def consumer() -> None:
             """Read orders and execute them in symbol-specific books."""

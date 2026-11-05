@@ -148,3 +148,115 @@ The next objective is to benchmark more realistic order-book scenarios
 and continue optimizing the matching engine while maintaining correctness.
 
 These results establish an initial performance comparison for ChronosMatch.
+
+
+
+---
+
+## 10. End-to-End Pipeline Performance Optimization
+
+### Objective
+
+Measure the complete asynchronous ChronosMatch pipeline and evaluate
+the impact of reducing redundant ring-buffer synchronization.
+
+### Test Environment
+
+- Python: 3.13.5
+- Operating System: Windows 11
+- Simulated orders: 100,000 per trial
+- Random seed: 42
+- Ring-buffer capacity: 64
+- Cython order-book capacity: 1,024 per symbol
+- Price variation: 0 ticks
+- Generation interval: 0 ms
+- Benchmark trials: 3 before and 3 after optimization
+
+### Workload
+
+The benchmark processes randomly generated BUY and SELL orders
+across AAPL, MSFT and GOOGL.
+
+The pipeline includes:
+
+1. Asynchronous market simulation.
+2. Binary order encoding.
+3. Memory-mapped ring-buffer transfer.
+4. Binary order decoding.
+5. Cython matching-engine execution.
+6. Performance and latency monitoring.
+
+### Optimization Implemented
+
+Previously, after every successful ring-buffer write, the producer
+called `buffer.size` to measure occupancy.
+
+This caused another lock acquisition and shared-header refresh.
+
+The new `write_with_size()` method returns the current occupancy
+while the write operation already holds the ring-buffer lock.
+
+The existing `write()` method remains compatible and continues
+returning a Boolean result.
+
+### Results Before Optimization
+
+| Trial | Pipeline throughput | Monitored throughput |
+|---|---:|---:|
+| 1 | 46,307 | 46,765 |
+| 2 | 51,819 | 52,494 |
+| 3 | 54,929 | 55,601 |
+| Median | 51,819 | 52,494 |
+
+### Results After Optimization
+
+| Trial | Pipeline throughput | Monitored throughput |
+|---|---:|---:|
+| 1 | 51,970 | 52,749 |
+| 2 | 54,297 | 54,950 |
+| 3 | 54,629 | 55,269 |
+| Median | 54,297 | 54,950 |
+
+Throughput is measured in orders per second.
+
+### Performance Comparison
+
+| Metric | Before | After |
+|---|---:|---:|
+| Median pipeline throughput | 51,819 | 54,297 |
+| Median monitored throughput | 52,494 | 54,950 |
+| Median p50 latency (us) | 104.7 | 104.9 |
+| Median p95 latency (us) | 130.8 | 128.6 |
+| Median p99 latency (us) | 208.6 | 201.5 |
+
+Median pipeline throughput improvement: approximately **4.78%**.
+
+Median monitored throughput improvement: approximately **4.68%**.
+
+### Correctness Verification
+
+- 100,000 orders processed per trial.
+- All three post-optimization trials completed successfully.
+- Buffer high-watermark remained between 13 and 14 records.
+- Full test suite: 153 passed.
+- Ruff: All checks passed.
+
+### Limitations
+
+- Measurements were collected on one development machine.
+- Results are local benchmarks, not exchange latency.
+- Producer and consumer are asynchronous tasks in one process.
+- The workload uses zero price variation and does not represent
+  every market condition.
+- Three trials provide an initial comparison, not a definitive
+  statistical performance guarantee.
+
+### Conclusion
+
+The ring-buffer occupancy optimization reduced redundant
+synchronization and produced a measured median pipeline throughput
+improvement of approximately 4.78% in the tested workload.
+
+The existing Python-versus-Cython matching-engine benchmark remains
+a separate measurement and should not be directly compared with
+end-to-end pipeline throughput.

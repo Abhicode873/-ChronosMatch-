@@ -153,6 +153,11 @@ class RingBuffer:
 
     def write(self, order: Order) -> bool:
         """Write an order or return False when the buffer is full."""
+        written, _ = self.write_with_size(order)
+        return written
+
+    def write_with_size(self, order: Order) -> tuple[bool, int]:
+        """Write an order and return occupancy observed under the same lock."""
         # Encode before acquiring the lock to keep the critical section short.
         record = encode_order(order)
 
@@ -160,11 +165,13 @@ class RingBuffer:
             mapping = self._ensure_open()
             self._refresh_header(mapping)
 
-            if self._write_seq - self._read_seq >= self.capacity:
-                return False
+            current_size = self._write_seq - self._read_seq
+
+            if current_size >= self.capacity:
+                return False, current_size
 
             if self._write_seq >= _UINT64_MAX:
-               raise OverflowError("Ring-buffer sequence counter exhausted")
+                raise OverflowError("Ring-buffer sequence counter exhausted")
 
             slot = self._write_seq % self.capacity
             offset = _HEADER_SIZE + slot * ORDER_RECORD_SIZE
@@ -173,7 +180,9 @@ class RingBuffer:
             mapping[offset : offset + ORDER_RECORD_SIZE] = record
             self._write_seq += 1
             self._write_header(mapping)
-            return True
+
+            # Return occupancy captured before releasing the lock.
+            return True, self._write_seq - self._read_seq
 
     def read(self) -> Order | None:
         """Read the oldest record, or return None if the buffer is empty."""

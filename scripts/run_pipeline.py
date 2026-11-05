@@ -30,6 +30,23 @@ def positive_int(value: str) -> int:
     return result
 
 
+def non_negative_int(value: str) -> int:
+    """Parse a non-negative integer."""
+    try:
+        result = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "Value must be a non-negative integer"
+        ) from exc
+
+    if result < 0:
+        raise argparse.ArgumentTypeError(
+            "Value must be non-negative"
+        )
+
+    return result
+
+
 def non_negative_float(value: str) -> float:
     """Parse a finite, non-negative floating-point value."""
     try:
@@ -51,12 +68,15 @@ async def run_demo(
     order_count: int,
     seed: int,
     buffer_capacity: int,
+    book_capacity: int,
+    price_variation_ticks: int,
     interval_ms: float,
 ) -> None:
     """Execute the integrated market pipeline and print its results."""
     simulator = AsyncMarketSimulator(
         seed=seed,
         interval_seconds=interval_ms / 1_000,
+        price_variation_ticks=price_variation_ticks,
     )
 
     # Use a temporary file so each demonstration starts with a fresh buffer.
@@ -72,13 +92,11 @@ async def run_demo(
             order_count,
             buffer_path,
             buffer_capacity=buffer_capacity,
+            book_capacity=book_capacity,
         )
 
         elapsed = time.perf_counter() - start
 
-
-    # Recover per-symbol order totals from generated and processed counts
-    # is not possible from the summary alone; trade totals are reported below.
     symbol_trades = Counter(
         trade.symbol for trade in result.trades
     )
@@ -91,7 +109,9 @@ async def run_demo(
     print(f"Trades executed: {result.trade_count:,}")
     print(f"Execution time: {elapsed:.6f} seconds")
     print(f"Pipeline rate: {order_count / elapsed:,.0f} orders/sec")
-    print(f"Ring-buffer capacity: {buffer_capacity}")
+    print(f"Ring-buffer capacity: {buffer_capacity:,}")
+    print(f"Cython book capacity: {book_capacity:,} per symbol")
+    print(f"Price variation: {price_variation_ticks} ticks")
     print(f"Buffer high-watermark: {result.buffer_high_watermark}")
 
     metrics = result.metrics
@@ -106,21 +126,11 @@ async def run_demo(
     )
 
     print("\nOrder Processing Latency")
-    print(
-        f"  Minimum: {metrics.latency_min_ns / 1_000:.3f} us"
-    )
-    print(
-        f"  Maximum: {metrics.latency_max_ns / 1_000:.3f} us"
-    )
-    print(
-        f"  p50: {metrics.latency_p50_ns / 1_000:.3f} us"
-    )
-    print(
-        f"  p95: {metrics.latency_p95_ns / 1_000:.3f} us"
-    )
-    print(
-        f"  p99: {metrics.latency_p99_ns / 1_000:.3f} us"
-    )
+    print(f"  Minimum: {metrics.latency_min_ns / 1_000:.3f} us")
+    print(f"  Maximum: {metrics.latency_max_ns / 1_000:.3f} us")
+    print(f"  p50: {metrics.latency_p50_ns / 1_000:.3f} us")
+    print(f"  p95: {metrics.latency_p95_ns / 1_000:.3f} us")
+    print(f"  p99: {metrics.latency_p99_ns / 1_000:.3f} us")
 
     print("\nTrades by symbol:")
     if symbol_trades:
@@ -180,6 +190,20 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--book-capacity",
+        type=positive_int,
+        default=1024,
+        help="Maximum active orders per symbol order book.",
+    )
+
+    parser.add_argument(
+        "--price-variation-ticks",
+        type=non_negative_int,
+        default=5,
+        help="Maximum random price variation in ticks.",
+    )
+
+    parser.add_argument(
         "--interval-ms",
         type=non_negative_float,
         default=0,
@@ -190,10 +214,12 @@ def main() -> None:
 
     asyncio.run(
         run_demo(
-            args.orders,
-            args.seed,
-            args.buffer_capacity,
-            args.interval_ms,
+            order_count=args.orders,
+            seed=args.seed,
+            buffer_capacity=args.buffer_capacity,
+            book_capacity=args.book_capacity,
+            price_variation_ticks=args.price_variation_ticks,
+            interval_ms=args.interval_ms,
         )
     )
 
