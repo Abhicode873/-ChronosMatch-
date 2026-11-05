@@ -170,3 +170,43 @@ def test_buffer_state_updates_after_reading_and_writing(tmp_path) -> None:
         assert ring.is_empty is True
         assert ring.is_full is False
         assert ring.size == 0       
+
+def test_corrupted_record_is_rejected_without_advancing_read_counter(
+    tmp_path,
+) -> None:
+    path = tmp_path / "corrupted-orders.mmap"
+    order = make_order("order-1")
+
+    with RingBuffer(path, capacity=2) as ring:
+        assert ring.write(order) is True
+
+    # The ring-buffer header occupies the first 32 bytes.
+    # Corrupt the protocol magic of the first order record.
+    with path.open("r+b") as buffer_file:
+        buffer_file.seek(32)
+        buffer_file.write(b"BAD!")
+
+    with RingBuffer(path, capacity=2) as ring:
+        assert ring.size == 1
+
+        with pytest.raises(ValueError, match="Invalid protocol magic"):
+            ring.read()
+
+        # A failed decode must not consume the unread record.
+        assert ring.size == 1
+        assert ring.is_empty is False
+
+
+def test_operations_on_closed_buffer_are_rejected(tmp_path) -> None:
+    ring = RingBuffer(tmp_path / "closed-orders.mmap", capacity=2)
+
+    ring.close()
+
+    with pytest.raises(ValueError, match="Ring buffer is closed"):
+        ring.read()
+
+    with pytest.raises(ValueError, match="Ring buffer is closed"):
+        ring.write(make_order("order-closed"))
+
+    with pytest.raises(ValueError, match="Ring buffer is closed"):
+        _ = ring.size

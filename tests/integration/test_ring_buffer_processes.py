@@ -183,3 +183,132 @@ def test_separate_processes_exchange_orders_without_corruption(
                 process.join(timeout=5.0)
 
         result_queue.close()
+
+
+def _failing_producer_worker(
+    path: str,
+    capacity: int,
+    lock: Any,
+    result_queue: Any,
+) -> None:
+    """Write one order and then simulate a producer failure."""
+    try:
+        with RingBuffer(path, capacity, lock=lock) as buffer:
+            buffer.write(_make_order(0))
+            raise RuntimeError("Simulated producer failure")
+    except Exception as exc:  # noqa: BLE001
+        result_queue.put(("producer_error", repr(exc)))
+
+
+def test_buffer_remains_readable_after_producer_failure(tmp_path) -> None:
+    """Verify completed writes remain readable after producer failure."""
+    context = multiprocessing.get_context("spawn")
+    path = tmp_path / "producer-failure.mmap"
+    capacity = 4
+
+    result_queue = context.Queue()
+    shared_lock = context.Lock()
+
+    with RingBuffer(path, capacity):
+        pass
+
+    producer = context.Process(
+        target=_failing_producer_worker,
+        args=(str(path), capacity, shared_lock, result_queue),
+    )
+
+    try:
+        producer.start()
+
+        message = result_queue.get(timeout=10.0)
+        producer.join(timeout=5.0)
+
+        assert message[0] == "producer_error"
+        assert "Simulated producer failure" in message[1]
+        assert not producer.is_alive()
+        assert producer.exitcode == 0
+
+        with RingBuffer(path, capacity, lock=shared_lock) as buffer:
+            assert buffer.size == 1
+            assert buffer.read() == _make_order(0)
+            assert buffer.is_empty
+
+    finally:
+        if producer.is_alive():
+            producer.terminate()
+            producer.join(timeout=5.0)
+
+        result_queue.close()
+
+
+def _failing_consumer_worker(
+    path: str,
+    capacity: int,
+    lock: Any,
+    result_queue: Any,
+) -> None:
+    """Read one order and then simulate a consumer failure."""
+    try:
+        with RingBuffer(path, capacity, lock=lock) as buffer:
+            first_order = buffer.read()
+
+            if first_order is None:
+                raise RuntimeError("Expected an order but buffer was empty")
+
+            result_queue.put(("consumer_read", first_order.order_id))
+            raise RuntimeError("Simulated consumer failure")
+
+    except Exception as exc:  # noqa: BLE001
+        result_queue.put(("consumer_error", repr(exc)))
+
+
+def test_unread_orders_remain_available_after_consumer_failure(
+    tmp_path,
+) -> None:
+    """Verify unread records survive a controlled consumer failure."""
+    context = multiprocessing.get_context("spawn")
+    path = tmp_path / "consumer-failure.mmap"
+    capacity = 4
+
+    result_queue = context.Queue()
+    shared_lock = context.Lock()
+
+    with RingBuffer(path, capacity) as buffer:
+        assert buffer.write(_make_order(0))
+        assert buffer.write(_make_order(1))
+
+    consumer = context.Process(
+        target=_failing_consumer_worker,
+        args=(str(path), capacity, shared_lock, result_queue),
+    )
+
+    try:
+        consumer.start()
+
+        messages = [
+            result_queue.get(timeout=10.0),
+            result_queue.get(timeout=10.0),
+        ]
+
+        consumer.join(timeout=5.0)
+
+        results = {message[0]: message[1] for message in messages}
+
+        assert results["consumer_read"] == _make_order(0).order_id
+        assert "Simulated consumer failure" in results["consumer_error"]
+        assert not consumer.is_alive()
+        assert consumer.exitcode == 0
+
+        with RingBuffer(path, capacity, lock=shared_lock) as buffer:
+            assert buffer.size == 1
+            assert buffer.read() == _make_order(1)
+            assert buffer.is_empty
+
+    finally:
+        if consumer.is_alive():
+            consumer.terminate()
+            consumer.join(timeout=5.0)
+
+        result_queue.close()
+
+
