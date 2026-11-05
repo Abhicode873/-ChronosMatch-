@@ -163,6 +163,9 @@ class RingBuffer:
             if self._write_seq - self._read_seq >= self.capacity:
                 return False
 
+            if self._write_seq >= _UINT64_MAX:
+               raise OverflowError("Ring-buffer sequence counter exhausted")
+
             slot = self._write_seq % self.capacity
             offset = _HEADER_SIZE + slot * ORDER_RECORD_SIZE
 

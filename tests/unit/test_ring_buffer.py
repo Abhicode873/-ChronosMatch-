@@ -283,3 +283,28 @@ def test_occupancy_exceeding_capacity_is_rejected(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="occupancy exceeds capacity"):
         RingBuffer(path, capacity=2)
+
+def test_write_rejects_exhausted_sequence_counter_without_mutation(
+    tmp_path,
+) -> None:
+    path = tmp_path / "exhausted-sequence.mmap"
+    max_uint64 = (1 << 64) - 1
+
+    with RingBuffer(path, capacity=2):
+        pass
+
+    # Simulate an empty buffer whose counters reached UINT64_MAX.
+    with path.open("r+b") as buffer_file:
+        buffer_file.seek(12)
+        buffer_file.write(struct.pack(">QQ", max_uint64, max_uint64))
+
+    with RingBuffer(path, capacity=2) as ring:
+        with pytest.raises(
+            OverflowError,
+            match="sequence counter exhausted",
+        ):
+            ring.write(make_order("order-overflow"))
+
+        # The failed write must not change the buffer state.
+        assert ring.size == 0
+        assert ring.read() is None
