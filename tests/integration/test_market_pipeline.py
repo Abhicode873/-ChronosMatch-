@@ -183,3 +183,145 @@ def test_pipeline_rejects_invalid_order_count(tmp_path) -> None:
                 tmp_path / "invalid-count.mmap",
             )
         )
+
+
+def test_pipeline_closes_ring_buffer_after_consumer_failure(
+    tmp_path,
+) -> None:
+    """Verify the mmap file is released when the consumer fails."""
+
+    class RepeatedBuySimulator(AsyncMarketSimulator):
+        async def stream_orders(self, count: int):
+            for index in range(count):
+                yield Order(
+                    order_id=f"cleanup-{index}",
+                    symbol="AAPL",
+                    side=Side.BUY,
+                    price_ticks=100_000,
+                    quantity=1,
+                )
+
+    simulator = RepeatedBuySimulator(
+        base_prices={"AAPL": 100_000},
+        seed=42,
+        price_variation_ticks=0,
+    )
+
+    buffer_path = tmp_path / "pipeline-failure.mmap"
+
+    # Capacity 1 means the second non-crossing buy order
+    # causes the Cython order book to raise OverflowError.
+    with pytest.raises(ExceptionGroup) as exc_info:
+        asyncio.run(
+            run_market_pipeline(
+                simulator,
+                3,
+                buffer_path,
+                buffer_capacity=2,
+                book_capacity=1,
+            )
+        )
+
+    assert any(
+        isinstance(error, OverflowError)
+        and "Order book capacity exhausted" in str(error)
+        for error in exc_info.value.exceptions
+    )
+
+    # Successful rename and deletion verify the mmap file was released.
+    renamed_path = tmp_path / "released-buffer.mmap"
+    buffer_path.replace(renamed_path)
+    renamed_path.unlink()
+
+
+def test_pipeline_closes_ring_buffer_when_cancelled(tmp_path) -> None:
+    """Verify ring-buffer cleanup when the pipeline is cancelled."""
+
+    async def exercise_cancellation() -> None:
+        started = asyncio.Event()
+        never_resume = asyncio.Event()
+
+        class BlockingSimulator(AsyncMarketSimulator):
+            async def stream_orders(self, count: int):
+                yield Order(
+                    order_id="cancel-order",
+                    symbol="AAPL",
+                    side=Side.BUY,
+                    price_ticks=100_000,
+                    quantity=1,
+                )
+
+                started.set()
+                await never_resume.wait()
+
+        simulator = BlockingSimulator(seed=42)
+        buffer_path = tmp_path / "cancelled-pipeline.mmap"
+
+        pipeline_task = asyncio.create_task(
+            run_market_pipeline(
+                simulator,
+                2,
+                buffer_path,
+                buffer_capacity=2,
+                book_capacity=10,
+            )
+        )
+
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+        pipeline_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pipeline_task
+
+    asyncio.run(exercise_cancellation())
+
+    # Verify that cancellation released the memory-mapped file.
+    renamed_path = tmp_path / "cancelled-buffer-released.mmap"
+    buffer_path = tmp_path / "cancelled-pipeline.mmap"
+
+    buffer_path.replace(renamed_path)
+    renamed_path.unlink()
+
+
+def test_pipeline_closes_ring_buffer_after_producer_failure(
+    tmp_path,
+) -> None:
+    """Verify buffer cleanup when the market simulator fails."""
+
+    class FailingSimulator(AsyncMarketSimulator):
+        async def stream_orders(self, count: int):
+            yield Order(
+                order_id="producer-failure-order",
+                symbol="AAPL",
+                side=Side.BUY,
+                price_ticks=100_000,
+                quantity=1,
+            )
+
+            raise RuntimeError("simulated producer failure")
+
+    simulator = FailingSimulator(seed=42)
+    buffer_path = tmp_path / "producer-failure.mmap"
+
+    with pytest.raises(ExceptionGroup) as exc_info:
+        asyncio.run(
+            run_market_pipeline(
+                simulator,
+                2,
+                buffer_path,
+                buffer_capacity=2,
+                book_capacity=10,
+            )
+        )
+
+    assert any(
+        isinstance(error, RuntimeError)
+        and "simulated producer failure" in str(error)
+        for error in exc_info.value.exceptions
+    )
+
+    # Verify that the mmap file is released after producer failure.
+    renamed_path = tmp_path / "producer-failure-released.mmap"
+    buffer_path.replace(renamed_path)
+    renamed_path.unlink()
