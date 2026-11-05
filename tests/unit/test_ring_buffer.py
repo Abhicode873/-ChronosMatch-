@@ -210,3 +210,76 @@ def test_operations_on_closed_buffer_are_rejected(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="Ring buffer is closed"):
         _ = ring.size
+
+
+import struct
+
+
+def test_invalid_header_magic_is_rejected(tmp_path) -> None:
+    path = tmp_path / "invalid-magic.mmap"
+
+    with RingBuffer(path, capacity=2):
+        pass
+
+    with path.open("r+b") as buffer_file:
+        buffer_file.seek(0)
+        buffer_file.write(b"BAD!")
+
+    with pytest.raises(ValueError, match="Invalid ring-buffer magic"):
+        RingBuffer(path, capacity=2)
+
+
+def test_unsupported_header_version_is_rejected(tmp_path) -> None:
+    path = tmp_path / "invalid-version.mmap"
+
+    with RingBuffer(path, capacity=2):
+        pass
+
+    with path.open("r+b") as buffer_file:
+        buffer_file.seek(4)
+        buffer_file.write(b"\x02")
+
+    with pytest.raises(ValueError, match="Unsupported ring-buffer version"):
+        RingBuffer(path, capacity=2)
+
+
+def test_header_capacity_mismatch_is_rejected(tmp_path) -> None:
+    path = tmp_path / "invalid-capacity.mmap"
+
+    with RingBuffer(path, capacity=2):
+        pass
+
+    with path.open("r+b") as buffer_file:
+        buffer_file.seek(8)
+        buffer_file.write(struct.pack(">I", 3))
+
+    with pytest.raises(ValueError, match="capacity does not match"):
+        RingBuffer(path, capacity=2)
+
+
+def test_invalid_sequence_counters_are_rejected(tmp_path) -> None:
+    path = tmp_path / "invalid-sequences.mmap"
+
+    with RingBuffer(path, capacity=2):
+        pass
+
+    with path.open("r+b") as buffer_file:
+        buffer_file.seek(12)
+        buffer_file.write(struct.pack(">QQ", 2, 1))
+
+    with pytest.raises(ValueError, match="Invalid ring-buffer sequence"):
+        RingBuffer(path, capacity=2)
+
+
+def test_occupancy_exceeding_capacity_is_rejected(tmp_path) -> None:
+    path = tmp_path / "invalid-occupancy.mmap"
+
+    with RingBuffer(path, capacity=2):
+        pass
+
+    with path.open("r+b") as buffer_file:
+        buffer_file.seek(12)
+        buffer_file.write(struct.pack(">QQ", 0, 3))
+
+    with pytest.raises(ValueError, match="occupancy exceeds capacity"):
+        RingBuffer(path, capacity=2)
