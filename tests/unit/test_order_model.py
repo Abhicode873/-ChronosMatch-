@@ -171,3 +171,44 @@ def test_order_is_immutable() -> None:
 
     with pytest.raises(FrozenInstanceError):
         order.quantity = 99  # type: ignore[misc]
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_message"),
+    [
+        ("price_ticks", 1 << 63, "signed 64-bit"),
+        ("quantity", 1 << 63, "signed 64-bit"),
+        ("timestamp_ns", 1 << 64, "unsigned 64-bit"),
+    ],
+)
+def test_numeric_fields_exceeding_supported_range_are_rejected(
+    field: str,
+    value: int,
+    error_message: str,
+) -> None:
+    fields = {
+        "order_id": "order-boundary",
+        "symbol": "AAPL",
+        "side": Side.BUY,
+        "price_ticks": 100,
+        "quantity": 1,
+        "timestamp_ns": 100,
+    }
+    fields[field] = value
+
+    with pytest.raises(ValueError, match=error_message):
+        Order(**fields)
+
+
+def test_maximum_supported_numeric_values_are_accepted() -> None:
+    order = Order(
+        order_id="order-maximum",
+        symbol="AAPL",
+        side=Side.BUY,
+        price_ticks=(1 << 63) - 1,
+        quantity=(1 << 63) - 1,
+        timestamp_ns=(1 << 64) - 1,
+    )
+
+    assert order.price_ticks == (1 << 63) - 1
+    assert order.quantity == (1 << 63) - 1
+    assert order.timestamp_ns == (1 << 64) - 1

@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 
+_INT64_MAX = (1 << 63) - 1
+_UINT64_MAX = (1 << 64) - 1
 
 class Side(Enum):
     """Supported sides of a limit order."""
@@ -67,10 +69,19 @@ class Order:
                 raise TypeError(f"{field_name} must be an integer")
 
         if self.price_ticks <= 0:
-            raise ValueError("price_ticks must be greater than zero")
+         raise ValueError("price_ticks must be greater than zero")
+
+        if self.price_ticks > _INT64_MAX:
+         raise ValueError("price_ticks exceeds signed 64-bit range")
 
         if self.quantity <= 0:
-            raise ValueError("quantity must be greater than zero")
+         raise ValueError("quantity must be greater than zero")
+
+        if self.quantity > _INT64_MAX:
+         raise ValueError("quantity exceeds signed 64-bit range")
 
         if self.timestamp_ns < 0:
-            raise ValueError("timestamp_ns must not be negative")
+         raise ValueError("timestamp_ns must not be negative")
+
+        if self.timestamp_ns > _UINT64_MAX:
+         raise ValueError("timestamp_ns exceeds unsigned 64-bit range")
