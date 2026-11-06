@@ -166,4 +166,59 @@ def test_capacity_must_be_positive() -> None:
     with pytest.raises(ValueError):
         CythonOrderBook(capacity=0)
 
+def test_cancel_active_order() -> None:
+    book = CythonOrderBook(capacity=8)
 
+    book.submit(1, BUY, 100, 5)
+
+    assert book.cancel(1) is True
+    assert book.active_order_count == 0
+    assert book.best_bid is None
+
+
+def test_cancel_unknown_order_returns_false() -> None:
+    book = CythonOrderBook(capacity=8)
+
+    assert book.cancel(999) is False
+
+
+def test_cancel_already_cancelled_order_returns_false() -> None:
+    book = CythonOrderBook(capacity=8)
+
+    book.submit(1, BUY, 100, 5)
+
+    assert book.cancel(1) is True
+    assert book.cancel(1) is False
+
+
+def test_cancel_filled_order_returns_false() -> None:
+    book = CythonOrderBook(capacity=8)
+
+    book.submit(1, SELL, 100, 2)
+    book.submit(2, BUY, 100, 2)
+
+    assert book.cancel(1) is False
+
+
+def test_cancelled_order_id_cannot_be_reused() -> None:
+    book = CythonOrderBook(capacity=8)
+
+    book.submit(1, BUY, 100, 5)
+    assert book.cancel(1) is True
+
+    with pytest.raises(ValueError, match="Duplicate"):
+        book.submit(1, BUY, 99, 2)
+
+
+def test_cancel_preserves_other_orders_at_same_price() -> None:
+    book = CythonOrderBook(capacity=8)
+
+    book.submit(1, SELL, 100, 2)
+    book.submit(2, SELL, 100, 3)
+
+    assert book.cancel(1) is True
+
+    trades = book.submit(3, BUY, 100, 3)
+
+    assert trades == [(2, 3, 100, 3)]
+    assert book.active_order_count == 0

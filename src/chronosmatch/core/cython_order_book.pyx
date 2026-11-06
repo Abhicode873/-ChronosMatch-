@@ -121,6 +121,31 @@ cdef class CythonOrderBook:
         """Return the number of orders currently resting in the book."""
         return self._active_count
 
+    def cancel(self, order_id):
+        """Cancel an active order by ID.
+
+        Returns True if cancelled, or False if the order is not active.
+        Cancelled order IDs remain reserved and cannot be reused.
+        """
+        cdef uint64_t oid
+        cdef Py_ssize_t i
+
+        if isinstance(order_id, bool) or not isinstance(order_id, int):
+            raise TypeError("order_id must be an integer")
+
+        if order_id < 0 or order_id > _UINT64_MAX_PY:
+            raise ValueError("order_id must fit an unsigned 64-bit integer")
+
+        oid = order_id
+
+        for i in range(self._capacity):
+            if self._orders[i].active and self._orders[i].order_id == oid:
+                self._orders[i].active = 0
+                self._active_count -= 1
+                return True
+
+        return False
+
     def submit(self, order_id, side, price_ticks, quantity):
         """Submit an order and return execution tuples.
 
