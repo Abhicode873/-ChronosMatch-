@@ -10,11 +10,18 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
 
+
 [project.optional-dependencies]
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.8"
+    "ruff>=0.8",
+    "httpx>=2.16",
 ]
+
 
 [tool.setuptools.packages.find]
 where = ["src"]
