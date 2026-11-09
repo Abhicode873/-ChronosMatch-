@@ -3,14 +3,27 @@ import { useState } from 'react'
 import {
   Activity,
   Play,
-  Square,
   RotateCcw,
   Settings2,
   Zap,
   Info,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
 } from 'lucide-react'
 
-type SimulationStatus = 'idle' | 'running' | 'stopped'
+import {
+  runSimulation,
+  type SimulationResponse,
+} from '../../services/api'
+
+type SimulationStatus = 'idle' | 'running' | 'completed' | 'error'
+
+const speedIntervals: Record<string, number> = {
+  slow: 0.01,
+  normal: 0,
+  fast: 0,
+}
 
 export default function Simulator() {
   const [symbol, setSymbol] = useState('AAPL')
@@ -18,27 +31,52 @@ export default function Simulator() {
   const [speed, setSpeed] = useState('normal')
   const [status, setStatus] = useState<SimulationStatus>('idle')
 
+  const [simulationResult, setSimulationResult] =
+    useState<SimulationResponse | null>(null)
+
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
   const isValidOrderCount =
     Number.isInteger(orderCount) &&
     orderCount >= 100 &&
-    orderCount <= 1000000
+    orderCount <= 100000
 
-  const handleStart = () => {
+  const handleStart = async () => {
     if (!isValidOrderCount || status === 'running') return
-    setStatus('running')
-  }
 
-  const handleStop = () => {
-    if (status === 'running') {
-      setStatus('stopped')
+    setStatus('running')
+    setErrorMessage(null)
+    setSimulationResult(null)
+
+    try {
+      const result = await runSimulation({
+        order_count: orderCount,
+        seed: 42,
+        interval_seconds: speedIntervals[speed],
+        buffer_capacity: 64,
+      })
+
+      setSimulationResult(result)
+      setStatus('completed')
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : 'Unable to connect to the ChronosMatch API.',
+      )
+      setStatus('error')
     }
   }
 
   const handleReset = () => {
+    if (status === 'running') return
+
     setStatus('idle')
     setSymbol('AAPL')
     setOrderCount(1000)
     setSpeed('normal')
+    setSimulationResult(null)
+    setErrorMessage(null)
   }
 
   const statusDetails = {
@@ -50,19 +88,41 @@ export default function Simulator() {
     },
     running: {
       label: 'Running',
-      description: 'Demo session marked as running.',
+      description: 'ChronosMatch backend is processing orders.',
+      color: 'text-blue-500',
+      dot: 'bg-blue-500',
+    },
+    completed: {
+      label: 'Completed',
+      description: 'Simulation successfully processed by the backend.',
       color: 'text-emerald-500',
       dot: 'bg-emerald-500',
     },
-    stopped: {
-      label: 'Stopped',
-      description: 'Demo session has been stopped.',
-      color: 'text-amber-500',
-      dot: 'bg-amber-500',
+    error: {
+      label: 'Failed',
+      description: 'The simulation could not be completed.',
+      color: 'text-rose-500',
+      dot: 'bg-rose-500',
     },
   }
 
   const currentStatus = statusDetails[status]
+
+  const selectedTrades =
+    simulationResult?.trades.filter(
+      (trade) => trade.symbol === symbol,
+    ) ?? []
+
+  const selectedBook =
+    simulationResult?.order_books.find(
+      (book) => book.symbol === symbol,
+    )
+
+  const formatNumber = (value: number) =>
+    value.toLocaleString('en-IN')
+
+  const formatLatency = (value: number) =>
+    `${(value / 1000).toFixed(2)} µs`
 
   return (
     <div className="space-y-6">
@@ -78,12 +138,12 @@ export default function Simulator() {
           </div>
 
           <p className="mt-1 text-sm text-[var(--muted)]">
-            Configure and control simulated market sessions.
+            Configure and execute simulations using the Python backend.
           </p>
         </div>
 
-        <span className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-600 dark:text-amber-400">
-          FRONTEND DEMO · NOT CONNECTED
+        <span className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+          API CONNECTED
         </span>
       </div>
 
@@ -92,9 +152,10 @@ export default function Simulator() {
         <Info size={19} className="mt-0.5 shrink-0 text-blue-500" />
 
         <p className="text-sm leading-relaxed text-[var(--muted)]">
-          These controls currently demonstrate the frontend interaction.
-          They do not start the Python market simulator or generate
-          actual backend orders. Backend integration will be added later.
+          Simulations run through the FastAPI backend, using the
+          ChronosMatch matching engine and market pipeline. The backend
+          generates orders for AAPL, MSFT and GOOGL. Select a symbol
+          below to filter the displayed results.
         </p>
       </div>
 
@@ -107,7 +168,9 @@ export default function Simulator() {
             </p>
 
             <div className="mt-3 flex items-center gap-3">
-              <span className={`h-3 w-3 rounded-full ${currentStatus.dot}`} />
+              <span
+                className={`h-3 w-3 rounded-full ${currentStatus.dot}`}
+              />
 
               <h4 className={`text-xl font-bold ${currentStatus.color}`}>
                 {currentStatus.label}
@@ -120,10 +183,40 @@ export default function Simulator() {
           </div>
 
           <div className="rounded-xl bg-[var(--surface-secondary)] p-4">
-            <Activity size={28} className="text-blue-500" />
+            {status === 'running' ? (
+              <Loader2
+                size={28}
+                className="animate-spin text-blue-500"
+              />
+            ) : status === 'completed' ? (
+              <CheckCircle2 size={28} className="text-emerald-500" />
+            ) : status === 'error' ? (
+              <AlertCircle size={28} className="text-rose-500" />
+            ) : (
+              <Activity size={28} className="text-blue-500" />
+            )}
           </div>
         </div>
       </div>
+
+      {/* Error */}
+      {errorMessage && (
+        <div className="flex gap-3 rounded-xl border border-rose-500/30 bg-rose-500/5 p-4">
+          <AlertCircle size={20} className="shrink-0 text-rose-500" />
+
+          <div>
+            <p className="font-semibold text-rose-500">
+              Simulation Error
+            </p>
+            <p className="mt-1 text-sm text-[var(--muted)]">
+              {errorMessage}
+            </p>
+            <p className="mt-2 text-xs text-[var(--muted)]">
+              Check that the FastAPI server is running on port 8000.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Configuration */}
       <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 sm:p-6">
@@ -137,7 +230,7 @@ export default function Simulator() {
             </h4>
 
             <p className="mt-1 text-xs text-[var(--muted)]">
-              Configure your demonstration session.
+              Configure your backend simulation.
             </p>
           </div>
         </div>
@@ -147,7 +240,7 @@ export default function Simulator() {
           {/* Symbol */}
           <div>
             <label className="mb-2 block text-sm font-medium text-[var(--foreground)]">
-              Trading Symbol
+              Display Trading Symbol
             </label>
 
             <select
@@ -160,6 +253,10 @@ export default function Simulator() {
               <option value="MSFT">MSFT</option>
               <option value="GOOGL">GOOGL</option>
             </select>
+
+            <p className="mt-2 text-xs text-[var(--muted)]">
+              Selects which symbol's results to display.
+            </p>
           </div>
 
           {/* Order count */}
@@ -171,7 +268,7 @@ export default function Simulator() {
             <input
               type="number"
               min={100}
-              max={1000000}
+              max={100000}
               step={100}
               value={orderCount}
               disabled={status === 'running'}
@@ -182,12 +279,12 @@ export default function Simulator() {
             />
 
             <p className="mt-2 text-xs text-[var(--muted)]">
-              Allowed range: 100–1,000,000 orders.
+              Allowed range: 100–100,000 orders.
             </p>
 
             {!isValidOrderCount && (
               <p className="mt-2 text-xs text-rose-500">
-                Enter a whole number between 100 and 1,000,000.
+                Enter a whole number between 100 and 100,000.
               </p>
             )}
           </div>
@@ -200,9 +297,9 @@ export default function Simulator() {
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               {[
-                { id: 'slow', label: 'Slow', description: 'Gradual' },
-                { id: 'normal', label: 'Normal', description: 'Balanced' },
-                { id: 'fast', label: 'Fast', description: 'Rapid' },
+                { id: 'slow', label: 'Slow', description: '10 ms interval' },
+                { id: 'normal', label: 'Normal', description: 'No delay' },
+                { id: 'fast', label: 'Fast', description: 'No delay' },
               ].map((option) => (
                 <button
                   key={option.id}
@@ -235,22 +332,19 @@ export default function Simulator() {
             disabled={!isValidOrderCount || status === 'running'}
             className="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-600/20 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <Play size={17} fill="currentColor" />
-            Start Demo
-          </button>
+            {status === 'running' ? (
+              <Loader2 size={17} className="animate-spin" />
+            ) : (
+              <Play size={17} fill="currentColor" />
+            )}
 
-          <button
-            onClick={handleStop}
-            disabled={status !== 'running'}
-            className="flex items-center gap-2 rounded-xl border border-rose-500/30 px-5 py-3 text-sm font-semibold text-rose-500 transition hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Square size={16} fill="currentColor" />
-            Stop
+            {status === 'running' ? 'Processing...' : 'Run Simulation'}
           </button>
 
           <button
             onClick={handleReset}
-            className="flex items-center gap-2 rounded-xl border border-[var(--border)] px-5 py-3 text-sm font-semibold text-[var(--muted)] transition hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+            disabled={status === 'running'}
+            className="flex items-center gap-2 rounded-xl border border-[var(--border)] px-5 py-3 text-sm font-semibold text-[var(--muted)] transition hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <RotateCcw size={16} />
             Reset
@@ -271,7 +365,7 @@ export default function Simulator() {
         <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
           <div>
             <p className="text-xs text-[var(--muted)]">
-              Selected Symbol
+              Display Symbol
             </p>
             <p className="mt-1 font-semibold text-[var(--foreground)]">
               {symbol}
@@ -283,7 +377,7 @@ export default function Simulator() {
               Configured Orders
             </p>
             <p className="mt-1 font-semibold text-[var(--foreground)]">
-              {orderCount.toLocaleString()}
+              {formatNumber(orderCount)}
             </p>
           </div>
 
@@ -298,6 +392,215 @@ export default function Simulator() {
         </div>
       </div>
 
+      {/* Actual backend results */}
+      {simulationResult && (
+        <>
+          <div className="flex items-center gap-2">
+            <CheckCircle2 size={20} className="text-emerald-500" />
+            <h4 className="text-lg font-bold text-[var(--foreground)]">
+              Backend Simulation Results
+            </h4>
+          </div>
+
+          {/* Summary cards */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            {[
+              {
+                label: 'Orders Generated',
+                value: simulationResult.summary.orders_generated,
+              },
+              {
+                label: 'Orders Processed',
+                value: simulationResult.summary.orders_processed,
+              },
+              {
+                label: 'Total Trades',
+                value: simulationResult.summary.trade_count,
+              },
+              {
+                label: 'Throughput',
+                value: `${formatNumber(
+                  Math.round(
+                    simulationResult.performance.throughput_orders_per_second,
+                  ),
+                )} / sec`,
+              },
+            ].map((item) => (
+              <div
+                key={item.label}
+                className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5"
+              >
+                <p className="text-sm text-[var(--muted)]">
+                  {item.label}
+                </p>
+                <p className="mt-3 text-2xl font-bold text-[var(--foreground)]">
+                  {typeof item.value === 'number'
+                    ? formatNumber(item.value)
+                    : item.value}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          {/* Performance */}
+          <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
+            <h4 className="font-semibold text-[var(--foreground)]">
+              Performance Metrics
+            </h4>
+
+            <div className="mt-5 grid grid-cols-2 gap-5 sm:grid-cols-3">
+              {[
+                {
+                  label: 'Elapsed Time',
+                  value: `${(
+                    simulationResult.performance.elapsed_ns / 1_000_000
+                  ).toFixed(2)} ms`,
+                },
+                {
+                  label: 'Minimum Latency',
+                  value: formatLatency(
+                    simulationResult.performance.latency_min_ns,
+                  ),
+                },
+                {
+                  label: 'Maximum Latency',
+                  value: formatLatency(
+                    simulationResult.performance.latency_max_ns,
+                  ),
+                },
+                {
+                  label: 'P50 Latency',
+                  value: formatLatency(
+                    simulationResult.performance.latency_p50_ns,
+                  ),
+                },
+                {
+                  label: 'P95 Latency',
+                  value: formatLatency(
+                    simulationResult.performance.latency_p95_ns,
+                  ),
+                },
+                {
+                  label: 'P99 Latency',
+                  value: formatLatency(
+                    simulationResult.performance.latency_p99_ns,
+                  ),
+                },
+              ].map((metric) => (
+                <div key={metric.label}>
+                  <p className="text-xs text-[var(--muted)]">
+                    {metric.label}
+                  </p>
+                  <p className="mt-1 font-semibold text-[var(--foreground)]">
+                    {metric.value}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Order book */}
+          <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
+            <h4 className="font-semibold text-[var(--foreground)]">
+              {symbol} Order Book Summary
+            </h4>
+
+            {selectedBook ? (
+              <div className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-3">
+                <div>
+                  <p className="text-xs text-[var(--muted)]">
+                    Active Orders
+                  </p>
+                  <p className="mt-1 text-xl font-bold text-[var(--foreground)]">
+                    {formatNumber(selectedBook.active_order_count)}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-xs text-[var(--muted)]">
+                    Best Bid (Ticks)
+                  </p>
+                  <p className="mt-1 text-xl font-bold text-emerald-500">
+                    {selectedBook.best_bid ?? '—'}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-xs text-[var(--muted)]">
+                    Best Ask (Ticks)
+                  </p>
+                  <p className="mt-1 text-xl font-bold text-rose-500">
+                    {selectedBook.best_ask ?? '—'}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <p className="mt-4 text-sm text-[var(--muted)]">
+                No order book information available for this symbol.
+              </p>
+            )}
+          </div>
+
+          {/* Recent trades */}
+          <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h4 className="font-semibold text-[var(--foreground)]">
+                {symbol} Executed Trades
+              </h4>
+
+              <span className="text-xs text-[var(--muted)]">
+                Showing up to 20 trades
+              </span>
+            </div>
+
+            {selectedTrades.length > 0 ? (
+              <div className="mt-5 overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--border)] text-xs text-[var(--muted)]">
+                      <th className="px-3 py-3">Maker Order</th>
+                      <th className="px-3 py-3">Taker Order</th>
+                      <th className="px-3 py-3">Price (Ticks)</th>
+                      <th className="px-3 py-3">Quantity</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {selectedTrades.slice(0, 20).map((trade, index) => (
+                      <tr
+                        key={`${trade.maker_order_id}-${trade.taker_order_id}-${index}`}
+                        className="border-b border-[var(--border)] last:border-0"
+                      >
+                        <td className="px-3 py-3 font-mono text-xs text-[var(--foreground)]">
+                          {trade.maker_order_id}
+                        </td>
+                        <td className="px-3 py-3 font-mono text-xs text-[var(--foreground)]">
+                          {trade.taker_order_id}
+                        </td>
+                        <td className="px-3 py-3 text-[var(--foreground)]">
+                          {trade.price_ticks}
+                        </td>
+                        <td className="px-3 py-3 text-[var(--foreground)]">
+                          {trade.quantity}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="mt-4 text-sm text-[var(--muted)]">
+                No trades were executed for this symbol.
+              </p>
+            )}
+          </div>
+
+          <p className="text-xs text-[var(--muted)]">
+            These results are generated by the ChronosMatch backend
+            simulator. They are simulated market data, not live exchange data.
+          </p>
+        </>
+      )}
     </div>
   )
 }

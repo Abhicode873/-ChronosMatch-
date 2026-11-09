@@ -4,6 +4,7 @@
 from tempfile import TemporaryDirectory
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 from chronosmatch.api.schemas import SimulationRunRequest
 from chronosmatch.simulator.market_simulator import AsyncMarketSimulator
@@ -13,6 +14,17 @@ app = FastAPI(
     title="ChronosMatch API",
     description="REST API for the ChronosMatch trading simulator.",
     version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
