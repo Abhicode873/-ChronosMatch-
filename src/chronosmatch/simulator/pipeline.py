@@ -3,6 +3,7 @@
 
 import asyncio
 import math
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic_ns, perf_counter_ns
@@ -18,6 +19,9 @@ from chronosmatch.monitoring.metrics import (
     MetricsSnapshot,
 )
 from chronosmatch.simulator.market_simulator import AsyncMarketSimulator
+
+PipelineEvent = dict[str, object]
+EventCallback = Callable[[PipelineEvent], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,12 +70,20 @@ async def run_market_pipeline(
     buffer_capacity: int = 64,
     book_capacity: int = 1024,
     poll_interval_seconds: float = 0.0001,
+    event_callback: EventCallback | None = None,
 ) -> PipelineResult:
     """Generate, transfer, and match simulated orders asynchronously.
 
     The producer generates orders and writes them to the memory-mapped
     ring buffer. The consumer reads, decodes, and submits them to a
     separate Cython order book for each trading symbol.
+
+    When an event callback is supplied, the pipeline emits:
+    - Trade events whenever the matching engine executes a trade.
+    - Progress events after each processed order.
+
+    Cancellation of the calling task cancels both pipeline tasks
+    through asyncio.TaskGroup and closes the ring buffer safely.
 
     Metrics include:
     - End-to-end order processing latency.
@@ -107,6 +119,9 @@ async def run_market_pipeline(
             "poll_interval_seconds must be finite and non-negative"
         )
 
+    if event_callback is not None and not callable(event_callback):
+        raise TypeError("event_callback must be callable")
+
     generated_count = 0
     processed_count = 0
     next_engine_id = 0
@@ -138,8 +153,6 @@ async def run_market_pipeline(
                     await asyncio.sleep(poll_interval_seconds)
 
                 generated_count += 1
-
-                # Record occupancy returned from the existing write lock.
                 metrics_collector.record_buffer_size(buffer_size)
 
         async def consumer() -> None:
@@ -153,13 +166,11 @@ async def run_market_pipeline(
                     await asyncio.sleep(poll_interval_seconds)
                     continue
 
-                # Assign an internal numeric ID for the Cython engine.
                 next_engine_id += 1
                 engine_id = next_engine_id
 
                 engine_id_to_order_id[engine_id] = order.order_id
 
-                # Each trading symbol gets its own independent book.
                 book = books.get(order.symbol)
 
                 if book is None:
@@ -168,7 +179,6 @@ async def run_market_pipeline(
 
                 side_code = BUY if order.side.value == "BUY" else SELL
 
-                # Submit the decoded order to the matching engine.
                 trades = book.submit(
                     engine_id,
                     side_code,
@@ -177,17 +187,30 @@ async def run_market_pipeline(
                 )
 
                 for maker_id, taker_id, price, quantity in trades:
-                    executions.append(
-                        ExecutedTrade(
-                            symbol=order.symbol,
-                            maker_order_id=engine_id_to_order_id[maker_id],
-                            taker_order_id=engine_id_to_order_id[taker_id],
-                            price_ticks=price,
-                            quantity=quantity,
-                        )
+                    trade = ExecutedTrade(
+                        symbol=order.symbol,
+                        maker_order_id=engine_id_to_order_id[maker_id],
+                        taker_order_id=engine_id_to_order_id[taker_id],
+                        price_ticks=price,
+                        quantity=quantity,
                     )
 
-                # Measure from simulator order creation to completed matching.
+                    executions.append(trade)
+
+                    if event_callback is not None:
+                        await event_callback(
+                            {
+                                "event": "trade",
+                                "data": {
+                                    "symbol": trade.symbol,
+                                    "maker_order_id": trade.maker_order_id,
+                                    "taker_order_id": trade.taker_order_id,
+                                    "price_ticks": trade.price_ticks,
+                                    "quantity": trade.quantity,
+                                },
+                            }
+                        )
+
                 latency_ns = max(
                     0,
                     monotonic_ns() - order.timestamp_ns,
@@ -200,10 +223,29 @@ async def run_market_pipeline(
 
                 processed_count += 1
 
-        # If either task fails, TaskGroup cancels the other task.
+                if event_callback is not None:
+                    await event_callback(
+                        {
+                            "event": "progress",
+                            "data": {
+                                "orders_processed": processed_count,
+                                "orders_generated": generated_count,
+                                "trade_count": len(executions),
+                            },
+                        }
+                    )
+
+        # TaskGroup ensures that cancellation or failure of either
+        # task also cancels the other task before leaving this block.
         async with asyncio.TaskGroup() as task_group:
-            task_group.create_task(producer())
-            task_group.create_task(consumer())
+            task_group.create_task(
+                producer(),
+                name="chronosmatch-producer",
+            )
+            task_group.create_task(
+                consumer(),
+                name="chronosmatch-consumer",
+            )
 
         book_summaries = tuple(
             BookSummary(
@@ -215,7 +257,6 @@ async def run_market_pipeline(
             for symbol, book in sorted(books.items())
         )
 
-    # Capture complete pipeline execution time.
     elapsed_ns = perf_counter_ns() - pipeline_started_ns
 
     metrics_snapshot = metrics_collector.snapshot(
