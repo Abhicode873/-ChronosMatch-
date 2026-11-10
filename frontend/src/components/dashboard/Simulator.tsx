@@ -56,8 +56,12 @@ export default function Simulator() {
         buffer_capacity: 64,
       })
 
-      setSimulationResult(result)
-      setStatus('completed')
+    setSimulationResult(result)
+      sessionStorage.setItem(
+      'chronosmatch_latest_simulation',
+      JSON.stringify(result),
+      )
+     setStatus('completed')
     } catch (error) {
       setErrorMessage(
         error instanceof Error
